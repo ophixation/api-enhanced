@@ -2,6 +2,7 @@ require('dotenv').config()
 const fs = require('fs')
 const path = require('path')
 const express = require('express')
+const { createHash, timingSafeEqual } = require('crypto')
 const request = require('./util/request')
 const packageJSON = require('./package.json')
 const exec = require('child_process').exec
@@ -190,12 +191,16 @@ async function constructServer(moduleDefs) {
   const app = express()
   const { CORS_ALLOW_ORIGIN } = process.env
   const allowOrigins = parseCorsAllowOrigins(CORS_ALLOW_ORIGIN)
+  const apiUser = process.env.PRIVATE_API_USER
+  const apiPassword = process.env.PRIVATE_API_PASSWORD
+  if (!apiUser || !apiPassword) {
+    throw new Error('PRIVATE_API_USER and PRIVATE_API_PASSWORD must be set')
+  }
+  const expectedAuth = createHash('sha256')
+    .update(`${apiUser}:${apiPassword}`)
+    .digest()
   app.set('trust proxy', true)
 
-  /**
-   * Serving static files
-   */
-  app.use(express.static(path.join(__dirname, 'public')))
   /**
    * CORS & Preflight request
    */
@@ -212,13 +217,37 @@ async function constructServer(moduleDefs) {
           ? { 'Access-Control-Allow-Origin': corsAllowOrigin }
           : {}),
         ...(shouldSetVaryHeader ? { Vary: 'Origin' } : {}),
-        'Access-Control-Allow-Headers': 'X-Requested-With,Content-Type',
+        'Access-Control-Allow-Headers':
+          'X-Requested-With,Content-Type,Authorization',
         'Access-Control-Allow-Methods': 'PUT,POST,GET,DELETE,OPTIONS',
         'Content-Type': 'application/json; charset=utf-8',
       })
     }
     req.method === 'OPTIONS' ? res.status(204).end() : next()
   })
+
+  /**
+   * Require authentication for both API routes and public pages.
+   */
+  app.use((req, res, next) => {
+    const authorization = req.get('Authorization') || ''
+    const match = /^Basic\s+([A-Za-z0-9+/]+={0,2})$/i.exec(authorization)
+    const credentials = match
+      ? Buffer.from(match[1], 'base64').toString('utf8')
+      : ''
+    const suppliedAuth = createHash('sha256').update(credentials).digest()
+
+    if (!match || !timingSafeEqual(suppliedAuth, expectedAuth)) {
+      res.set('WWW-Authenticate', 'Basic realm="Private Music API"')
+      return res.status(401).type('text/plain').send('Unauthorized')
+    }
+    next()
+  })
+
+  /**
+   * Serving static files
+   */
+  app.use(express.static(path.join(__dirname, 'public')))
 
   /**
    * Cookie Parser
